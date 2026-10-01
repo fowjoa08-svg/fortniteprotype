@@ -6,8 +6,9 @@ export interface GameState {
   opponentScore: number;
   boost: number;
   speed: number;
-  mode: 'menu' | 'playing' | 'battle';
+  mode: 'menu' | 'playing' | 'gameover';
   time: number;
+  goalFlash: number;
 }
 
 export class GameEngine {
@@ -16,915 +17,1032 @@ export class GameEngine {
   private renderer: THREE.WebGLRenderer;
   private clock: THREE.Clock;
   private container: HTMLElement;
-  
+
   // Game objects
-  private player: THREE.Group;
+  private playerCar: THREE.Group;
   private playerVelocity: THREE.Vector3;
   private playerRotation: number = 0;
-  private ball: THREE.Mesh;
+  private ball: THREE.Group;
   private ballVelocity: THREE.Vector3;
-  private opponent: THREE.Group;
+  private opponentCar: THREE.Group;
   private opponentVelocity: THREE.Vector3;
-  
-  // Environment
-  private terrain: THREE.Group;
-  private trees: THREE.Group[];
-  private buildings: THREE.Group[];
-  private arena: THREE.Group;
-  private goals: THREE.Mesh[];
-  
+
   // Controls
   private keys: { [key: string]: boolean } = {};
-  private mouseX: number = 0;
-  private isPointerLocked: boolean = false;
-  
+
   // Game state
   private state: GameState;
   private onStateChange: (state: GameState) => void;
   private frameCount: number = 0;
   private lastFpsUpdate: number = 0;
   private animationId: number = 0;
-  
+
   // Physics
-  private gravity: number = -25;
-  private groundLevel: number = 0.5;
-  private arenaSize: number = 80;
-  
+  private gravity: number = -30;
+  private arenaLength: number = 120;
+  private arenaWidth: number = 70;
+
+  // Environment animation
+  private waterMesh: THREE.Mesh | null = null;
+  private clouds: THREE.Group[] = [];
+
   constructor(container: HTMLElement, onStateChange: (state: GameState) => void) {
     this.container = container;
     this.onStateChange = onStateChange;
     this.clock = new THREE.Clock();
-    
+
     this.state = {
-      fps: 0,
-      score: 0,
-      opponentScore: 0,
-      boost: 100,
-      speed: 0,
-      mode: 'menu',
-      time: 180
+      fps: 0, score: 0, opponentScore: 0,
+      boost: 100, speed: 0, mode: 'menu', time: 180, goalFlash: 0
     };
-    
-    // Initialize Three.js
+
+    // Scene
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x87CEEB);
-    this.scene.fog = new THREE.Fog(0x87CEEB, 100, 300);
-    
-    this.camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 500);
-    this.camera.position.set(0, 8, 15);
-    
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+
+    // Camera
+    this.camera = new THREE.PerspectiveCamera(65, container.clientWidth / container.clientHeight, 0.1, 1000);
+    this.camera.position.set(0, 12, 20);
+
+    // Renderer - high quality
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance'
+    });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.2;
+    this.renderer.toneMappingExposure = 1.0;
     container.appendChild(this.renderer.domElement);
-    
-    // Initialize game objects
-    this.player = new THREE.Group();
+
+    // Init objects
+    this.playerCar = new THREE.Group();
     this.playerVelocity = new THREE.Vector3();
-    this.ball = new THREE.Mesh();
+    this.ball = new THREE.Group();
     this.ballVelocity = new THREE.Vector3();
-    this.opponent = new THREE.Group();
+    this.opponentCar = new THREE.Group();
     this.opponentVelocity = new THREE.Vector3();
-    this.terrain = new THREE.Group();
-    this.trees = [];
-    this.buildings = [];
-    this.arena = new THREE.Group();
-    this.goals = [];
-    
+
+    this.setupEnvironment();
     this.setupLights();
-    this.createTerrain();
-    this.createPlayer();
-    this.createOpponent();
-    this.createBall();
     this.createArena();
-    this.createEnvironment();
+    this.createRealisticCar(0xcc0000, this.playerCar);
+    this.createRealisticCar(0x0044cc, this.opponentCar);
+    this.opponentCar.position.set(20, 0, 0);
+    this.opponentCar.rotation.y = Math.PI;
+    this.scene.add(this.opponentCar);
+    this.playerCar.position.set(-20, 0, 0);
+    this.scene.add(this.playerCar);
+    this.createRealisticBall();
     this.setupControls();
-    
+
     window.addEventListener('resize', this.onResize.bind(this));
   }
-  
-  private setupLights(): void {
-    // Ambient light
-    const ambient = new THREE.AmbientLight(0x404060, 0.5);
-    this.scene.add(ambient);
-    
-    // Sun light
-    const sun = new THREE.DirectionalLight(0xffffee, 1.5);
-    sun.position.set(50, 80, 30);
-    sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = 200;
-    sun.shadow.camera.left = -100;
-    sun.shadow.camera.right = 100;
-    sun.shadow.camera.top = 100;
-    sun.shadow.camera.bottom = -100;
-    this.scene.add(sun);
-    
-    // Hemisphere light for sky color
-    const hemi = new THREE.HemisphereLight(0x87CEEB, 0x3d7a3d, 0.4);
-    this.scene.add(hemi);
-    
-    // Point lights for arena
-    const arenaLight1 = new THREE.PointLight(0xff6600, 1, 50);
-    arenaLight1.position.set(-35, 15, 0);
-    this.scene.add(arenaLight1);
-    
-    const arenaLight2 = new THREE.PointLight(0x0066ff, 1, 50);
-    arenaLight2.position.set(35, 15, 0);
-    this.scene.add(arenaLight2);
+
+  private setupEnvironment(): void {
+    // Sky gradient
+    const skyGeo = new THREE.SphereGeometry(400, 32, 32);
+    const skyMat = new THREE.ShaderMaterial({
+      uniforms: {
+        topColor: { value: new THREE.Color(0x0055aa) },
+        bottomColor: { value: new THREE.Color(0x88ccff) },
+        offset: { value: 20 },
+        exponent: { value: 0.4 }
+      },
+      vertexShader: `
+        varying vec3 vWorldPosition;
+        void main() {
+          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          vWorldPosition = worldPosition.xyz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 topColor;
+        uniform vec3 bottomColor;
+        uniform float offset;
+        uniform float exponent;
+        varying vec3 vWorldPosition;
+        void main() {
+          float h = normalize(vWorldPosition + offset).y;
+          gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
+        }
+      `,
+      side: THREE.BackSide
+    });
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+    this.scene.add(sky);
+
+    // Fog
+    this.scene.fog = new THREE.FogExp2(0x88bbdd, 0.003);
+
+    // Terrain - realistic with noise
+    this.createRealisticTerrain();
+
+    // Water lake
+    this.createWater();
+
+    // Realistic trees
+    this.createForest();
+
+    // Mountains
+    this.createMountains();
+
+    // Clouds
+    this.createClouds();
+
+    // Rocks
+    this.createRocks();
   }
-  
-  private createTerrain(): void {
-    // Main ground - Fortnite style green terrain
-    const groundGeo = new THREE.PlaneGeometry(400, 400, 64, 64);
-    const groundMat = new THREE.MeshLambertMaterial({ color: 0x4a8c3f });
-    
-    // Add some height variation
-    const vertices = groundGeo.attributes.position;
+
+  private createRealisticTerrain(): void {
+    const size = 500;
+    const segments = 128;
+    const geo = new THREE.PlaneGeometry(size, size, segments, segments);
+    const vertices = geo.attributes.position;
+
+    // Procedural terrain with multiple octaves of noise
     for (let i = 0; i < vertices.count; i++) {
       const x = vertices.getX(i);
       const y = vertices.getY(i);
       const dist = Math.sqrt(x * x + y * y);
-      if (dist > this.arenaSize * 0.7) {
-        vertices.setZ(i, Math.sin(x * 0.05) * 2 + Math.cos(y * 0.05) * 2 + Math.random() * 0.5);
+
+      let height = 0;
+      // Keep arena flat
+      if (dist < this.arenaLength * 0.8) {
+        height = 0;
+      } else {
+        // Gentle hills outside arena
+        height = Math.sin(x * 0.02) * Math.cos(y * 0.02) * 5;
+        height += Math.sin(x * 0.05 + 1.3) * Math.cos(y * 0.04) * 2;
+        height += Math.sin(x * 0.1) * Math.sin(y * 0.1) * 1;
+        // Ramp up for mountains
+        const mountainDist = Math.max(0, dist - 150);
+        height += mountainDist * 0.15 * (Math.sin(x * 0.03) * 0.5 + 0.5);
+      }
+      vertices.setZ(i, height);
+    }
+    geo.computeVertexNormals();
+
+    // Grass texture via vertex colors
+    const colors = new Float32Array(vertices.count * 3);
+    for (let i = 0; i < vertices.count; i++) {
+      const y = vertices.getZ(i);
+      const x = vertices.getX(i);
+      const z = vertices.getY(i);
+      // Vary green based on position
+      const noise = Math.sin(x * 0.1) * Math.cos(z * 0.1) * 0.1;
+      if (y > 10) {
+        // Snow
+        colors[i * 3] = 0.9 + noise * 0.1;
+        colors[i * 3 + 1] = 0.92 + noise * 0.1;
+        colors[i * 3 + 2] = 0.95;
+      } else if (y > 5) {
+        // Rock
+        colors[i * 3] = 0.4 + noise;
+        colors[i * 3 + 1] = 0.38 + noise;
+        colors[i * 3 + 2] = 0.35;
+      } else {
+        // Grass with variation
+        const grassVar = Math.sin(x * 0.3 + z * 0.2) * 0.05;
+        colors[i * 3] = 0.15 + grassVar;
+        colors[i * 3 + 1] = 0.45 + grassVar + noise;
+        colors[i * 3 + 2] = 0.1 + grassVar;
       }
     }
-    groundGeo.computeVertexNormals();
-    
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
-    
-    // Arena floor (darker, flat)
-    const arenaFloorGeo = new THREE.PlaneGeometry(this.arenaSize * 2, this.arenaSize * 1.2);
-    const arenaFloorMat = new THREE.MeshLambertMaterial({ color: 0x2a5a2a });
-    const arenaFloor = new THREE.Mesh(arenaFloorGeo, arenaFloorMat);
-    arenaFloor.rotation.x = -Math.PI / 2;
-    arenaFloor.position.y = 0.01;
-    arenaFloor.receiveShadow = true;
-    this.scene.add(arenaFloor);
-  }
-  
-  private createLegoCharacter(color: number, isPlayer: boolean): THREE.Group {
-    const group = new THREE.Group();
-    
-    // Body (Lego brick style - rectangular)
-    const bodyGeo = new THREE.BoxGeometry(1.2, 1.4, 0.8);
-    const bodyMat = new THREE.MeshPhongMaterial({ color, shininess: 80 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 1.2;
-    body.castShadow = true;
-    group.add(body);
-    
-    // Head (cylinder like Lego minifigure)
-    const headGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.6, 8);
-    const headMat = new THREE.MeshPhongMaterial({ color: 0xffcc88, shininess: 60 });
-    const head = new THREE.Mesh(headGeo, headMat);
-    head.position.y = 2.3;
-    head.castShadow = true;
-    group.add(head);
-    
-    // Lego stud on head
-    const studGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.15, 8);
-    const studMat = new THREE.MeshPhongMaterial({ color: 0xffcc88, shininess: 100 });
-    const stud = new THREE.Mesh(studGeo, studMat);
-    stud.position.y = 2.65;
-    group.add(stud);
-    
-    // Eyes
-    const eyeGeo = new THREE.SphereGeometry(0.08, 8, 8);
-    const eyeMat = new THREE.MeshPhongMaterial({ color: 0x000000 });
-    const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
-    leftEye.position.set(-0.15, 2.35, 0.35);
-    group.add(leftEye);
-    const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
-    rightEye.position.set(0.15, 2.35, 0.35);
-    group.add(rightEye);
-    
-    // Smile
-    const smileGeo = new THREE.TorusGeometry(0.12, 0.03, 8, 8, Math.PI);
-    const smileMat = new THREE.MeshPhongMaterial({ color: 0x000000 });
-    const smile = new THREE.Mesh(smileGeo, smileMat);
-    smile.position.set(0, 2.2, 0.38);
-    smile.rotation.x = Math.PI;
-    group.add(smile);
-    
-    // Arms
-    const armGeo = new THREE.BoxGeometry(0.3, 1.0, 0.3);
-    const armMat = new THREE.MeshPhongMaterial({ color, shininess: 80 });
-    const leftArm = new THREE.Mesh(armGeo, armMat);
-    leftArm.position.set(-0.9, 1.2, 0);
-    leftArm.castShadow = true;
-    group.add(leftArm);
-    const rightArm = new THREE.Mesh(armGeo, armMat);
-    rightArm.position.set(0.9, 1.2, 0);
-    rightArm.castShadow = true;
-    group.add(rightArm);
-    
-    // Legs
-    const legGeo = new THREE.BoxGeometry(0.5, 0.9, 0.6);
-    const legMat = new THREE.MeshPhongMaterial({ color: 0x1a1a4a, shininess: 60 });
-    const leftLeg = new THREE.Mesh(legGeo, legMat);
-    leftLeg.position.set(-0.3, 0.25, 0);
-    leftLeg.castShadow = true;
-    group.add(leftLeg);
-    const rightLeg = new THREE.Mesh(legGeo, legMat);
-    rightLeg.position.set(0.3, 0.25, 0);
-    rightLeg.castShadow = true;
-    group.add(rightLeg);
-    
-    // Vehicle/Car (Rocket League style)
-    if (isPlayer) {
-      const car = this.createLegoCar(0xff4444);
-      car.position.y = 0;
-      group.add(car);
-      group.userData.car = car;
-    } else {
-      const car = this.createLegoCar(0x4444ff);
-      car.position.y = 0;
-      group.add(car);
-      group.userData.car = car;
-    }
-    
-    return group;
-  }
-  
-  private createLegoCar(color: number): THREE.Group {
-    const car = new THREE.Group();
-    
-    // Car body - blocky Lego style
-    const bodyGeo = new THREE.BoxGeometry(2.5, 0.8, 1.4);
-    const bodyMat = new THREE.MeshPhongMaterial({ color, shininess: 100 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 0.6;
-    body.castShadow = true;
-    car.add(body);
-    
-    // Car roof/cabin
-    const roofGeo = new THREE.BoxGeometry(1.2, 0.6, 1.2);
-    const roofMat = new THREE.MeshPhongMaterial({ color: 0x333333, shininess: 80, transparent: true, opacity: 0.8 });
-    const roof = new THREE.Mesh(roofGeo, roofMat);
-    roof.position.set(-0.1, 1.2, 0);
-    roof.castShadow = true;
-    car.add(roof);
-    
-    // Lego studs on car
-    const studGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.1, 8);
-    const studMat = new THREE.MeshPhongMaterial({ color, shininess: 120 });
-    for (let i = -1; i <= 1; i++) {
-      for (let j = -1; j <= 1; j += 2) {
-        const stud = new THREE.Mesh(studGeo, studMat);
-        stud.position.set(i * 0.6, 1.05, j * 0.4);
-        car.add(stud);
-      }
-    }
-    
-    // Wheels
-    const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.2, 12);
-    const wheelMat = new THREE.MeshPhongMaterial({ color: 0x222222, shininess: 40 });
-    const wheelPositions = [
-      [-0.8, 0.35, 0.8], [0.8, 0.35, 0.8],
-      [-0.8, 0.35, -0.8], [0.8, 0.35, -0.8]
-    ];
-    wheelPositions.forEach(pos => {
-      const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-      wheel.position.set(pos[0], pos[1], pos[2]);
-      wheel.rotation.x = Math.PI / 2;
-      wheel.castShadow = true;
-      car.add(wheel);
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.9,
+      metalness: 0.0,
+      flatShading: false
     });
-    
-    // Boost flame (initially invisible)
-    const flameGeo = new THREE.ConeGeometry(0.3, 1.5, 8);
-    const flameMat = new THREE.MeshBasicMaterial({ color: 0xff6600, transparent: true, opacity: 0 });
-    const flame = new THREE.Mesh(flameGeo, flameMat);
-    flame.position.set(1.8, 0.6, 0);
-    flame.rotation.z = Math.PI / 2;
-    car.add(flame);
-    car.userData.flame = flame;
-    
-    return car;
+
+    const terrain = new THREE.Mesh(geo, mat);
+    terrain.rotation.x = -Math.PI / 2;
+    terrain.receiveShadow = true;
+    this.scene.add(terrain);
   }
-  
-  private createPlayer(): void {
-    this.player = this.createLegoCharacter(0xff4444, true);
-    this.player.position.set(-20, 0, 0);
-    this.scene.add(this.player);
-  }
-  
-  private createOpponent(): void {
-    this.opponent = this.createLegoCharacter(0x4444ff, false);
-    this.opponent.position.set(20, 0, 0);
-    this.opponent.rotation.y = Math.PI;
-    this.scene.add(this.opponent);
-  }
-  
-  private createBall(): void {
-    // Giant Lego-style soccer ball
-    const ballGroup = new THREE.Group();
-    
-    const ballGeo = new THREE.IcosahedronGeometry(2, 1);
-    const ballMat = new THREE.MeshPhongMaterial({ 
-      color: 0xffffff, 
-      shininess: 100,
-      flatShading: true 
+
+  private createWater(): void {
+    const waterGeo = new THREE.CircleGeometry(40, 32);
+    const waterMat = new THREE.MeshPhysicalMaterial({
+      color: 0x006699,
+      metalness: 0.1,
+      roughness: 0.1,
+      transparent: true,
+      opacity: 0.8,
+      transmission: 0.3,
     });
-    const ballMesh = new THREE.Mesh(ballGeo, ballMat);
-    ballMesh.castShadow = true;
-    ballGroup.add(ballMesh);
-    
-    // Black pentagon patches
-    const patchGeo = new THREE.CircleGeometry(0.6, 5);
-    const patchMat = new THREE.MeshPhongMaterial({ color: 0x111111 });
-    const patchPositions = [
-      [0, 2, 0], [0, -2, 0], [2, 0, 0], [-2, 0, 0], [0, 0, 2], [0, 0, -2]
-    ];
-    patchPositions.forEach(pos => {
-      const patch = new THREE.Mesh(patchGeo, patchMat);
-      patch.position.set(pos[0], pos[1], pos[2]);
-      patch.lookAt(0, 0, 0);
-      patch.position.multiplyScalar(1.01);
-      ballGroup.add(patch);
-    });
-    
-    // Lego studs on ball
-    const studGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.15, 8);
-    const studMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
-    for (let i = 0; i < 8; i++) {
-      const angle = (i / 8) * Math.PI * 2;
-      const stud = new THREE.Mesh(studGeo, studMat);
-      stud.position.set(Math.cos(angle) * 2, Math.sin(angle) * 2, 0);
-      stud.lookAt(0, 0, 0);
-      ballGroup.add(stud);
-    }
-    
-    this.ball = ballGroup as any;
-    (this.ball as any).position.set(0, 2, 0);
-    this.scene.add(this.ball);
-    this.ballVelocity.set(0, 0, 0);
+    this.waterMesh = new THREE.Mesh(waterGeo, waterMat);
+    this.waterMesh.rotation.x = -Math.PI / 2;
+    this.waterMesh.position.set(100, -1, -80);
+    this.scene.add(this.waterMesh);
   }
-  
-  private createArena(): void {
-    this.arena = new THREE.Group();
-    
-    // Arena walls (Lego brick style)
-    const wallMat = new THREE.MeshPhongMaterial({ color: 0x555577, shininess: 60 });
-    
-    // Side walls
-    const sideWallGeo = new THREE.BoxGeometry(2, 8, this.arenaSize * 1.2);
-    const leftWall = new THREE.Mesh(sideWallGeo, wallMat);
-    leftWall.position.set(-this.arenaSize, 4, 0);
-    leftWall.castShadow = true;
-    leftWall.receiveShadow = true;
-    this.arena.add(leftWall);
-    
-    const rightWall = new THREE.Mesh(sideWallGeo, wallMat);
-    rightWall.position.set(this.arenaSize, 4, 0);
-    rightWall.castShadow = true;
-    rightWall.receiveShadow = true;
-    this.arena.add(rightWall);
-    
-    // Back walls (with goal openings)
-    const backWallGeo = new THREE.BoxGeometry(this.arenaSize * 2, 8, 2);
-    
-    // Front back wall (with gap for goal)
-    const backWallLeft = new THREE.Mesh(
-      new THREE.BoxGeometry((this.arenaSize * 2 - 20) / 2, 8, 2),
-      wallMat
-    );
-    backWallLeft.position.set(-(this.arenaSize + 5), 4, -this.arenaSize * 0.6);
-    this.arena.add(backWallLeft);
-    
-    const backWallRight = new THREE.Mesh(
-      new THREE.BoxGeometry((this.arenaSize * 2 - 20) / 2, 8, 2),
-      wallMat
-    );
-    backWallRight.position.set(this.arenaSize + 5, 4, -this.arenaSize * 0.6);
-    this.arena.add(backWallRight);
-    
-    // Top back wall
-    const topBackWall = new THREE.Mesh(
-      new THREE.BoxGeometry(20, 3, 2),
-      wallMat
-    );
-    topBackWall.position.set(0, 6.5, -this.arenaSize * 0.6);
-    this.arena.add(topBackWall);
-    
-    // Goals
-    const goalMat = new THREE.MeshPhongMaterial({ color: 0xff6600, emissive: 0xff3300, emissiveIntensity: 0.3 });
-    const goalGeo = new THREE.BoxGeometry(20, 5, 3);
-    
-    const goal1 = new THREE.Mesh(goalGeo, goalMat);
-    goal1.position.set(0, 2.5, -this.arenaSize * 0.6 - 2);
-    goal1.visible = false;
-    this.scene.add(goal1);
-    this.goals.push(goal1);
-    
-    const goalMat2 = new THREE.MeshPhongMaterial({ color: 0x0066ff, emissive: 0x0033ff, emissiveIntensity: 0.3 });
-    const goal2 = new THREE.Mesh(goalGeo, goalMat2);
-    goal2.position.set(0, 2.5, this.arenaSize * 0.6 + 2);
-    goal2.visible = false;
-    this.scene.add(goal2);
-    this.goals.push(goal2);
-    
-    // Goal frames (visible)
-    const frameMat = new THREE.MeshPhongMaterial({ color: 0xffff00, emissive: 0xffff00, emissiveIntensity: 0.2 });
-    const frameGeo = new THREE.BoxGeometry(0.5, 6, 0.5);
-    
-    // Left goal posts
-    const lp1 = new THREE.Mesh(frameGeo, frameMat);
-    lp1.position.set(-10, 3, -this.arenaSize * 0.6);
-    this.arena.add(lp1);
-    const lp2 = new THREE.Mesh(frameGeo, frameMat);
-    lp2.position.set(10, 3, -this.arenaSize * 0.6);
-    this.arena.add(lp2);
-    const lp3 = new THREE.Mesh(new THREE.BoxGeometry(20.5, 0.5, 0.5), frameMat);
-    lp3.position.set(0, 6, -this.arenaSize * 0.6);
-    this.arena.add(lp3);
-    
-    // Right goal posts
-    const rp1 = new THREE.Mesh(frameGeo, new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.2 }));
-    rp1.position.set(-10, 3, this.arenaSize * 0.6);
-    this.arena.add(rp1);
-    const rp2 = new THREE.Mesh(frameGeo, new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.2 }));
-    rp2.position.set(10, 3, this.arenaSize * 0.6);
-    this.arena.add(rp2);
-    const rp3 = new THREE.Mesh(new THREE.BoxGeometry(20.5, 0.5, 0.5), new THREE.MeshPhongMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.2 }));
-    rp3.position.set(0, 6, this.arenaSize * 0.6);
-    this.arena.add(rp3);
-    
-    // Center line
-    const lineGeo = new THREE.BoxGeometry(this.arenaSize * 2, 0.05, 0.3);
-    const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const centerLine = new THREE.Mesh(lineGeo, lineMat);
-    centerLine.position.y = 0.03;
-    this.arena.add(centerLine);
-    
-    // Center circle
-    const circleGeo = new THREE.RingGeometry(8, 8.3, 32);
-    const circleMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
-    const centerCircle = new THREE.Mesh(circleGeo, circleMat);
-    centerCircle.rotation.x = -Math.PI / 2;
-    centerCircle.position.y = 0.03;
-    this.arena.add(centerCircle);
-    
-    // Lego studs on arena floor
-    const floorStudGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.15, 8);
-    const floorStudMat = new THREE.MeshPhongMaterial({ color: 0x3a6a3a });
-    for (let x = -this.arenaSize + 5; x < this.arenaSize; x += 10) {
-      for (let z = -this.arenaSize * 0.6 + 5; z < this.arenaSize * 0.6; z += 10) {
-        if (Math.abs(x) > 12 || Math.abs(z) > 5) {
-          const floorStud = new THREE.Mesh(floorStudGeo, floorStudMat);
-          floorStud.position.set(x, 0.08, z);
-          this.arena.add(floorStud);
-        }
-      }
-    }
-    
-    this.scene.add(this.arena);
-  }
-  
-  private createEnvironment(): void {
-    // Trees (Lego style)
-    for (let i = 0; i < 40; i++) {
-      const tree = this.createLegoTree();
+
+  private createForest(): void {
+    for (let i = 0; i < 120; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const dist = this.arenaSize + 15 + Math.random() * 80;
-      tree.position.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+      const dist = 80 + Math.random() * 150;
+      const x = Math.cos(angle) * dist;
+      const z = Math.sin(angle) * dist;
+
+      // Don't place in water area
+      if (Math.sqrt((x - 100) ** 2 + (z + 80) ** 2) < 45) continue;
+
+      const tree = this.createRealisticTree();
+      const scale = 0.8 + Math.random() * 1.2;
+      tree.scale.set(scale, scale, scale);
+      tree.position.set(x, 0, z);
+      tree.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(tree);
-      this.trees.push(tree);
-    }
-    
-    // Buildings (Fortnite style)
-    for (let i = 0; i < 12; i++) {
-      const building = this.createLegoBuilding();
-      const angle = Math.random() * Math.PI * 2;
-      const dist = this.arenaSize + 30 + Math.random() * 60;
-      building.position.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
-      building.rotation.y = Math.random() * Math.PI * 2;
-      this.scene.add(building);
-      this.buildings.push(building);
-    }
-    
-    // Clouds
-    for (let i = 0; i < 15; i++) {
-      const cloud = this.createCloud();
-      cloud.position.set(
-        (Math.random() - 0.5) * 300,
-        40 + Math.random() * 30,
-        (Math.random() - 0.5) * 300
-      );
-      this.scene.add(cloud);
-    }
-    
-    // Mountains in background
-    for (let i = 0; i < 8; i++) {
-      const mountain = this.createMountain();
-      const angle = (i / 8) * Math.PI * 2;
-      mountain.position.set(Math.cos(angle) * 180, 0, Math.sin(angle) * 180);
-      this.scene.add(mountain);
     }
   }
-  
-  private createLegoTree(): THREE.Group {
+
+  private createRealisticTree(): THREE.Group {
     const tree = new THREE.Group();
-    
-    // Trunk (Lego cylinder)
-    const trunkGeo = new THREE.CylinderGeometry(0.4, 0.6, 4, 6);
-    const trunkMat = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
+
+    // Trunk - tapered cylinder
+    const trunkGeo = new THREE.CylinderGeometry(0.2, 0.4, 4, 8);
+    const trunkMat = new THREE.MeshStandardMaterial({
+      color: 0x4a3520,
+      roughness: 0.95,
+      metalness: 0.0
+    });
     const trunk = new THREE.Mesh(trunkGeo, trunkMat);
     trunk.position.y = 2;
     trunk.castShadow = true;
     tree.add(trunk);
-    
-    // Leaves (Lego blocky style)
-    const colors = [0x228B22, 0x32CD32, 0x006400];
-    for (let i = 0; i < 3; i++) {
-      const leafGeo = new THREE.BoxGeometry(3 - i * 0.5, 2, 3 - i * 0.5);
-      const leafMat = new THREE.MeshPhongMaterial({ color: colors[i % 3] });
-      const leaf = new THREE.Mesh(leafGeo, leafMat);
-      leaf.position.y = 4 + i * 1.8;
-      leaf.castShadow = true;
-      tree.add(leaf);
-    }
-    
-    // Lego stud on top
-    const studGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 8);
-    const studMat = new THREE.MeshPhongMaterial({ color: 0x228B22 });
-    const stud = new THREE.Mesh(studGeo, studMat);
-    stud.position.y = 9.5;
-    tree.add(stud);
-    
+
+    // Foliage - multiple spheres for realistic look
+    const foliageColors = [0x2d5a1b, 0x3a6b24, 0x2a5018, 0x4a7a30];
+    const foliagePositions = [
+      { x: 0, y: 5, z: 0, r: 2.2 },
+      { x: 0.8, y: 5.5, z: 0.5, r: 1.5 },
+      { x: -0.6, y: 5.8, z: -0.4, r: 1.6 },
+      { x: 0.3, y: 6.5, z: -0.3, r: 1.3 },
+      { x: -0.4, y: 4.5, z: 0.7, r: 1.4 },
+    ];
+
+    foliagePositions.forEach((pos, i) => {
+      const fGeo = new THREE.SphereGeometry(pos.r, 8, 8);
+      const fMat = new THREE.MeshStandardMaterial({
+        color: foliageColors[i % foliageColors.length],
+        roughness: 0.8,
+        metalness: 0.0,
+        flatShading: true
+      });
+      const foliage = new THREE.Mesh(fGeo, fMat);
+      foliage.position.set(pos.x, pos.y, pos.z);
+      foliage.castShadow = true;
+      tree.add(foliage);
+    });
+
     return tree;
   }
-  
-  private createLegoBuilding(): THREE.Group {
-    const building = new THREE.Group();
-    const floors = 2 + Math.floor(Math.random() * 3);
-    const colors = [0xcc8844, 0xaa6633, 0x996644, 0x887755];
-    
-    for (let i = 0; i < floors; i++) {
-      const floorGeo = new THREE.BoxGeometry(8, 3, 8);
-      const floorMat = new THREE.MeshPhongMaterial({ color: colors[i % colors.length] });
-      const floor = new THREE.Mesh(floorGeo, floorMat);
-      floor.position.y = 1.5 + i * 3;
-      floor.castShadow = true;
-      floor.receiveShadow = true;
-      building.add(floor);
-      
-      // Windows
-      const windowGeo = new THREE.BoxGeometry(1.5, 1.5, 0.1);
-      const windowMat = new THREE.MeshPhongMaterial({ color: 0x88ccff, emissive: 0x224466, emissiveIntensity: 0.3 });
-      for (let side = 0; side < 4; side++) {
-        const win = new THREE.Mesh(windowGeo, windowMat);
-        const angle = (side / 4) * Math.PI * 2;
-        win.position.set(Math.sin(angle) * 4.05, 1.5 + i * 3, Math.cos(angle) * 4.05);
-        win.rotation.y = angle;
-        building.add(win);
+
+  private createMountains(): void {
+    for (let i = 0; i < 12; i++) {
+      const angle = (i / 12) * Math.PI * 2 + Math.random() * 0.3;
+      const dist = 200 + Math.random() * 80;
+      const height = 40 + Math.random() * 50;
+      const radius = 30 + Math.random() * 20;
+
+      const mtGeo = new THREE.ConeGeometry(radius, height, 8);
+      // Deform vertices for realism
+      const verts = mtGeo.attributes.position;
+      for (let j = 0; j < verts.count; j++) {
+        const vx = verts.getX(j);
+        const vy = verts.getY(j);
+        const vz = verts.getZ(j);
+        verts.setX(j, vx + (Math.random() - 0.5) * 5);
+        verts.setZ(j, vz + (Math.random() - 0.5) * 5);
       }
-      
-      // Lego studs on each floor
-      const studGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.15, 8);
-      const studMat = new THREE.MeshPhongMaterial({ color: colors[i % colors.length] });
-      for (let sx = -2; sx <= 2; sx += 2) {
-        for (let sz = -2; sz <= 2; sz += 2) {
-          const stud = new THREE.Mesh(studGeo, studMat);
-          stud.position.set(sx, 3.1 + i * 3, sz);
-          building.add(stud);
-        }
+      mtGeo.computeVertexNormals();
+
+      const mtMat = new THREE.MeshStandardMaterial({
+        color: 0x556644,
+        roughness: 0.9,
+        flatShading: true
+      });
+      const mountain = new THREE.Mesh(mtGeo, mtMat);
+      mountain.position.set(Math.cos(angle) * dist, height / 2 - 5, Math.sin(angle) * dist);
+      mountain.castShadow = true;
+      this.scene.add(mountain);
+
+      // Snow cap
+      if (height > 50) {
+        const snowGeo = new THREE.ConeGeometry(radius * 0.3, height * 0.2, 8);
+        const snowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7 });
+        const snow = new THREE.Mesh(snowGeo, snowMat);
+        snow.position.set(mountain.position.x, mountain.position.y + height * 0.4, mountain.position.z);
+        this.scene.add(snow);
       }
     }
-    
-    // Roof
-    const roofGeo = new THREE.ConeGeometry(5, 3, 4);
-    const roofMat = new THREE.MeshPhongMaterial({ color: 0x882222 });
-    const roof = new THREE.Mesh(roofGeo, roofMat);
-    roof.position.y = floors * 3 + 1.5;
-    roof.rotation.y = Math.PI / 4;
-    roof.castShadow = true;
-    building.add(roof);
-    
-    return building;
   }
-  
+
+  private createClouds(): void {
+    for (let i = 0; i < 20; i++) {
+      const cloud = this.createCloud();
+      cloud.position.set(
+        (Math.random() - 0.5) * 400,
+        50 + Math.random() * 40,
+        (Math.random() - 0.5) * 400
+      );
+      cloud.scale.setScalar(1 + Math.random() * 2);
+      this.scene.add(cloud);
+      this.clouds.push(cloud);
+    }
+  }
+
   private createCloud(): THREE.Group {
     const cloud = new THREE.Group();
-    const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
-    
-    for (let i = 0; i < 5; i++) {
-      const size = 2 + Math.random() * 3;
-      const cloudGeo = new THREE.SphereGeometry(size, 8, 8);
-      const part = new THREE.Mesh(cloudGeo, cloudMat);
-      part.position.set(
-        (Math.random() - 0.5) * 8,
-        (Math.random() - 0.5) * 2,
-        (Math.random() - 0.5) * 4
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 1,
+      transparent: true,
+      opacity: 0.85
+    });
+
+    const numPuffs = 5 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < numPuffs; i++) {
+      const size = 3 + Math.random() * 5;
+      const geo = new THREE.SphereGeometry(size, 8, 8);
+      const puff = new THREE.Mesh(geo, mat);
+      puff.position.set(
+        (Math.random() - 0.5) * 12,
+        (Math.random() - 0.5) * 3,
+        (Math.random() - 0.5) * 6
       );
-      cloud.add(part);
+      puff.scale.y = 0.6;
+      cloud.add(puff);
     }
-    
     return cloud;
   }
-  
-  private createMountain(): THREE.Group {
-    const mountain = new THREE.Group();
-    const mtGeo = new THREE.ConeGeometry(30 + Math.random() * 20, 40 + Math.random() * 30, 6);
-    const mtMat = new THREE.MeshPhongMaterial({ color: 0x556655, flatShading: true });
-    const mt = new THREE.Mesh(mtGeo, mtMat);
-    mt.position.y = 15;
-    mountain.add(mt);
-    
-    // Snow cap
-    const snowGeo = new THREE.ConeGeometry(10, 10, 6);
-    const snowMat = new THREE.MeshPhongMaterial({ color: 0xffffff });
-    const snow = new THREE.Mesh(snowGeo, snowMat);
-    snow.position.y = 35;
-    mountain.add(snow);
-    
-    return mountain;
+
+  private createRocks(): void {
+    for (let i = 0; i < 30; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 70 + Math.random() * 100;
+      const x = Math.cos(angle) * dist;
+      const z = Math.sin(angle) * dist;
+
+      const rockGeo = new THREE.DodecahedronGeometry(1 + Math.random() * 2, 1);
+      const verts = rockGeo.attributes.position;
+      for (let j = 0; j < verts.count; j++) {
+        verts.setX(j, verts.getX(j) + (Math.random() - 0.5) * 0.3);
+        verts.setY(j, verts.getY(j) + (Math.random() - 0.5) * 0.3);
+        verts.setZ(j, verts.getZ(j) + (Math.random() - 0.5) * 0.3);
+      }
+      rockGeo.computeVertexNormals();
+
+      const rockMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0.3 + Math.random() * 0.2, 0.3 + Math.random() * 0.1, 0.25),
+        roughness: 0.95,
+        flatShading: true
+      });
+      const rock = new THREE.Mesh(rockGeo, rockMat);
+      rock.position.set(x, 0.5, z);
+      rock.rotation.set(Math.random(), Math.random(), Math.random());
+      rock.scale.y = 0.5 + Math.random() * 0.5;
+      rock.castShadow = true;
+      this.scene.add(rock);
+    }
   }
-  
+
+  private setupLights(): void {
+    // Ambient
+    const ambient = new THREE.AmbientLight(0x445566, 0.4);
+    this.scene.add(ambient);
+
+    // Sun
+    const sun = new THREE.DirectionalLight(0xffeedd, 1.8);
+    sun.position.set(60, 100, 40);
+    sun.castShadow = true;
+    sun.shadow.mapSize.width = 2048;
+    sun.shadow.mapSize.height = 2048;
+    sun.shadow.camera.near = 0.5;
+    sun.shadow.camera.far = 300;
+    sun.shadow.camera.left = -120;
+    sun.shadow.camera.right = 120;
+    sun.shadow.camera.top = 80;
+    sun.shadow.camera.bottom = -80;
+    sun.shadow.bias = -0.001;
+    this.scene.add(sun);
+
+    // Fill light
+    const fill = new THREE.DirectionalLight(0x8899bb, 0.3);
+    fill.position.set(-30, 20, -20);
+    this.scene.add(fill);
+
+    // Hemisphere
+    const hemi = new THREE.HemisphereLight(0x88bbff, 0x445522, 0.5);
+    this.scene.add(hemi);
+
+    // Arena spotlights
+    const spotL = new THREE.SpotLight(0xff4400, 2, 80, Math.PI / 4, 0.5);
+    spotL.position.set(-this.arenaLength * 0.8, 30, 0);
+    spotL.target.position.set(0, 0, 0);
+    this.scene.add(spotL);
+    this.scene.add(spotL.target);
+
+    const spotR = new THREE.SpotLight(0x0044ff, 2, 80, Math.PI / 4, 0.5);
+    spotR.position.set(this.arenaLength * 0.8, 30, 0);
+    spotR.target.position.set(0, 0, 0);
+    this.scene.add(spotR);
+    this.scene.add(spotR.target);
+  }
+
+  private createArena(): void {
+    // Arena floor - smooth dark surface
+    const floorGeo = new THREE.PlaneGeometry(this.arenaLength * 2, this.arenaWidth * 2);
+    const floorMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1a2e,
+      roughness: 0.3,
+      metalness: 0.1
+    });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = 0.01;
+    floor.receiveShadow = true;
+    this.scene.add(floor);
+
+    // Arena lines
+    const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+    // Center line
+    const centerLine = new THREE.Mesh(new THREE.PlaneGeometry(0.3, this.arenaWidth * 2), lineMat);
+    centerLine.rotation.x = -Math.PI / 2;
+    centerLine.position.y = 0.02;
+    this.scene.add(centerLine);
+
+    // Center circle
+    const circleGeo = new THREE.RingGeometry(10, 10.3, 48);
+    const circle = new THREE.Mesh(circleGeo, lineMat);
+    circle.rotation.x = -Math.PI / 2;
+    circle.position.y = 0.02;
+    this.scene.add(circle);
+
+    // Walls
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: 0x333355,
+      roughness: 0.5,
+      metalness: 0.3,
+      transparent: true,
+      opacity: 0.6
+    });
+
+    // Side walls
+    const sideWallGeo = new THREE.BoxGeometry(this.arenaLength * 2, 10, 1);
+    const wallL = new THREE.Mesh(sideWallGeo, wallMat);
+    wallL.position.set(0, 5, -this.arenaWidth);
+    this.scene.add(wallL);
+    const wallR = new THREE.Mesh(sideWallGeo, wallMat);
+    wallR.position.set(0, 5, this.arenaWidth);
+    this.scene.add(wallR);
+
+    // Back walls with goal openings
+    const backSideGeo = new THREE.BoxGeometry((this.arenaLength - 15), 10, 1);
+    const bwL1 = new THREE.Mesh(backSideGeo, wallMat);
+    bwL1.position.set(-(this.arenaLength / 2 + 7.5), 5, 0);
+    bwL1.rotation.y = Math.PI / 2;
+    this.scene.add(bwL1);
+    const bwR1 = new THREE.Mesh(backSideGeo, wallMat);
+    bwR1.position.set((this.arenaLength / 2 + 7.5), 5, 0);
+    bwR1.rotation.y = Math.PI / 2;
+    this.scene.add(bwR1);
+
+    // Goal frames
+    this.createGoalFrame(-this.arenaLength, 0xff4400);
+    this.createGoalFrame(this.arenaLength, 0x0066ff);
+
+    // Goal nets (simple representation)
+    const netMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.15,
+      side: THREE.DoubleSide,
+      wireframe: true
+    });
+    const netGeo = new THREE.BoxGeometry(5, 8, 20);
+    const netL = new THREE.Mesh(netGeo, netMat);
+    netL.position.set(-this.arenaLength - 2.5, 4, 0);
+    this.scene.add(netL);
+    const netR = new THREE.Mesh(netGeo, netMat);
+    netR.position.set(this.arenaLength + 2.5, 4, 0);
+    this.scene.add(netR);
+  }
+
+  private createGoalFrame(x: number, color: number): void {
+    const frameMat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 0.5,
+      metalness: 0.8,
+      roughness: 0.2
+    });
+
+    // Posts
+    const postGeo = new THREE.CylinderGeometry(0.3, 0.3, 8, 8);
+    const postL = new THREE.Mesh(postGeo, frameMat);
+    postL.position.set(x, 4, -10);
+    this.scene.add(postL);
+    const postR = new THREE.Mesh(postGeo, frameMat);
+    postR.position.set(x, 4, 10);
+    this.scene.add(postR);
+
+    // Crossbar
+    const crossGeo = new THREE.CylinderGeometry(0.3, 0.3, 20, 8);
+    const cross = new THREE.Mesh(crossGeo, frameMat);
+    cross.position.set(x, 8, 0);
+    cross.rotation.x = Math.PI / 2;
+    this.scene.add(cross);
+
+    // Glow light
+    const goalLight = new THREE.PointLight(color, 2, 20);
+    goalLight.position.set(x, 4, 0);
+    this.scene.add(goalLight);
+  }
+
+  private createRealisticCar(color: number, group: THREE.Group): void {
+    // === ROCKET LEAGUE STYLE CAR ===
+    // Sleek, low-profile sports car
+
+    const carBody = new THREE.Group();
+
+    // Main body - low and wide
+    const bodyShape = new THREE.Shape();
+    bodyShape.moveTo(-2.2, 0.3);
+    bodyShape.lineTo(-2.0, 0.3);
+    bodyShape.lineTo(-1.5, 0.8);
+    bodyShape.lineTo(1.2, 0.8);
+    bodyShape.lineTo(2.0, 0.5);
+    bodyShape.lineTo(2.2, 0.3);
+    bodyShape.lineTo(-2.2, 0.3);
+
+    const extrudeSettings = { depth: 1.8, bevelEnabled: true, bevelThickness: 0.1, bevelSize: 0.1, bevelSegments: 3 };
+    const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, extrudeSettings);
+    const bodyMat = new THREE.MeshPhysicalMaterial({
+      color,
+      metalness: 0.7,
+      roughness: 0.2,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.1,
+    });
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.z = -0.9;
+    body.castShadow = true;
+    carBody.add(body);
+
+    // Cabin/roof
+    const cabinGeo = new THREE.BoxGeometry(1.8, 0.5, 1.4);
+    const cabinMat = new THREE.MeshPhysicalMaterial({
+      color: 0x111122,
+      metalness: 0.1,
+      roughness: 0.0,
+      transmission: 0.6,
+      transparent: true,
+      opacity: 0.7,
+    });
+    const cabin = new THREE.Mesh(cabinGeo, cabinMat);
+    cabin.position.set(-0.2, 1.05, 0);
+    cabin.castShadow = true;
+    carBody.add(cabin);
+
+    // Windshield slope
+    const windshieldGeo = new THREE.BoxGeometry(0.1, 0.5, 1.4);
+    const windshieldMat = new THREE.MeshPhysicalMaterial({
+      color: 0x334466,
+      metalness: 0.0,
+      roughness: 0.0,
+      transmission: 0.8,
+      transparent: true,
+      opacity: 0.5,
+    });
+    const windshield = new THREE.Mesh(windshieldGeo, windshieldMat);
+    windshield.position.set(0.7, 1.0, 0);
+    windshield.rotation.z = -0.4;
+    carBody.add(windshield);
+
+    // Spoiler
+    const spoilerGeo = new THREE.BoxGeometry(0.3, 0.08, 1.8);
+    const spoilerMat = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.5, roughness: 0.3 });
+    const spoiler = new THREE.Mesh(spoilerGeo, spoilerMat);
+    spoiler.position.set(-2.0, 1.0, 0);
+    carBody.add(spoiler);
+    // Spoiler supports
+    const supportGeo = new THREE.BoxGeometry(0.08, 0.3, 0.08);
+    const supL = new THREE.Mesh(supportGeo, spoilerMat);
+    supL.position.set(-2.0, 0.85, -0.6);
+    carBody.add(supL);
+    const supR = new THREE.Mesh(supportGeo, spoilerMat);
+    supR.position.set(-2.0, 0.85, 0.6);
+    carBody.add(supR);
+
+    // Headlights
+    const headlightGeo = new THREE.SphereGeometry(0.15, 8, 8);
+    const headlightMat = new THREE.MeshStandardMaterial({
+      color: 0xffffcc,
+      emissive: 0xffffaa,
+      emissiveIntensity: 1.0
+    });
+    const hlL = new THREE.Mesh(headlightGeo, headlightMat);
+    hlL.position.set(2.1, 0.55, -0.5);
+    carBody.add(hlL);
+    const hlR = new THREE.Mesh(headlightGeo, headlightMat);
+    hlR.position.set(2.1, 0.55, 0.5);
+    carBody.add(hlR);
+
+    // Tail lights
+    const tailMat = new THREE.MeshStandardMaterial({
+      color: 0xff0000,
+      emissive: 0xff0000,
+      emissiveIntensity: 0.5
+    });
+    const tlL = new THREE.Mesh(headlightGeo, tailMat);
+    tlL.position.set(-2.15, 0.55, -0.5);
+    carBody.add(tlL);
+    const tlR = new THREE.Mesh(headlightGeo, tailMat);
+    tlR.position.set(-2.15, 0.55, 0.5);
+    carBody.add(tlR);
+
+    // Wheels - realistic with rims
+    const wheelPositions = [
+      { x: 1.4, z: -1.0 }, { x: 1.4, z: 1.0 },
+      { x: -1.4, z: -1.0 }, { x: -1.4, z: 1.0 }
+    ];
+
+    wheelPositions.forEach(pos => {
+      const wheel = this.createWheel();
+      wheel.position.set(pos.x, 0.35, pos.z);
+      carBody.add(wheel);
+    });
+
+    // Underbody
+    const underGeo = new THREE.BoxGeometry(4.2, 0.1, 1.8);
+    const underMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    const under = new THREE.Mesh(underGeo, underMat);
+    under.position.y = 0.25;
+    carBody.add(under);
+
+    // Boost flame
+    const flameGeo = new THREE.ConeGeometry(0.2, 2, 8);
+    const flameMat = new THREE.MeshBasicMaterial({
+      color: 0xff6600,
+      transparent: true,
+      opacity: 0
+    });
+    const flame = new THREE.Mesh(flameGeo, flameMat);
+    flame.position.set(-3.2, 0.5, 0);
+    flame.rotation.z = Math.PI / 2;
+    carBody.add(flame);
+    carBody.userData.flame = flame;
+
+    // Inner flame
+    const innerFlameGeo = new THREE.ConeGeometry(0.1, 1.2, 8);
+    const innerFlameMat = new THREE.MeshBasicMaterial({
+      color: 0xffff00,
+      transparent: true,
+      opacity: 0
+    });
+    const innerFlame = new THREE.Mesh(innerFlameGeo, innerFlameMat);
+    innerFlame.position.set(-2.8, 0.5, 0);
+    innerFlame.rotation.z = Math.PI / 2;
+    carBody.add(innerFlame);
+    carBody.userData.innerFlame = innerFlame;
+
+    group.add(carBody);
+    group.userData.body = carBody;
+  }
+
+  private createWheel(): THREE.Group {
+    const wheel = new THREE.Group();
+
+    // Tire
+    const tireGeo = new THREE.TorusGeometry(0.35, 0.15, 8, 16);
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+    const tire = new THREE.Mesh(tireGeo, tireMat);
+    tire.rotation.y = Math.PI / 2;
+    wheel.add(tire);
+
+    // Rim
+    const rimGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.2, 8);
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9, roughness: 0.1 });
+    const rim = new THREE.Mesh(rimGeo, rimMat);
+    rim.rotation.x = Math.PI / 2;
+    wheel.add(rim);
+
+    // Rim spokes
+    for (let i = 0; i < 5; i++) {
+      const spokeGeo = new THREE.BoxGeometry(0.04, 0.22, 0.04);
+      const spoke = new THREE.Mesh(spokeGeo, rimMat);
+      const angle = (i / 5) * Math.PI * 2;
+      spoke.position.set(Math.cos(angle) * 0.12, 0, Math.sin(angle) * 0.12);
+      spoke.rotation.x = angle;
+      wheel.add(spoke);
+    }
+
+    return wheel;
+  }
+
+  private createRealisticBall(): void {
+    this.ball = new THREE.Group();
+
+    // Main sphere
+    const ballGeo = new THREE.SphereGeometry(2, 32, 32);
+    const ballMat = new THREE.MeshPhysicalMaterial({
+      color: 0xeeeeee,
+      metalness: 0.0,
+      roughness: 0.3,
+      clearcoat: 0.5,
+    });
+    const ballMesh = new THREE.Mesh(ballGeo, ballMat);
+    ballMesh.castShadow = true;
+    this.ball.add(ballMesh);
+
+    // Pentagon pattern
+    const pentGeo = new THREE.CircleGeometry(0.7, 5);
+    const pentMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.5 });
+
+    // Place pentagons at icosahedron vertices
+    const icoGeo = new THREE.IcosahedronGeometry(2.01, 0);
+    const icoVerts = icoGeo.attributes.position;
+    const placed: THREE.Vector3[] = [];
+
+    for (let i = 0; i < icoVerts.count; i++) {
+      const v = new THREE.Vector3(icoVerts.getX(i), icoVerts.getY(i), icoVerts.getZ(i));
+      // Check distance from already placed
+      let tooClose = false;
+      for (const p of placed) {
+        if (v.distanceTo(p) < 1.5) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        const pent = new THREE.Mesh(pentGeo, pentMat);
+        pent.position.copy(v);
+        pent.lookAt(0, 0, 0);
+        this.ball.add(pent);
+        placed.push(v);
+      }
+    }
+
+    this.ball.position.set(0, 2, 0);
+    this.scene.add(this.ball);
+  }
+
   private setupControls(): void {
-    document.addEventListener('keydown', (e) => {
-      this.keys[e.key.toLowerCase()] = true;
-    });
-    document.addEventListener('keyup', (e) => {
-      this.keys[e.key.toLowerCase()] = false;
-    });
-    document.addEventListener('mousemove', (e) => {
-      if (this.isPointerLocked) {
-        this.mouseX += e.movementX * 0.002;
-      }
-    });
-    
-    this.renderer.domElement.addEventListener('click', () => {
-      if (this.state.mode === 'playing') {
-        this.renderer.domElement.requestPointerLock();
-      }
-    });
-    
-    document.addEventListener('pointerlockchange', () => {
-      this.isPointerLocked = document.pointerLockElement === this.renderer.domElement;
-    });
+    document.addEventListener('keydown', (e) => { this.keys[e.key.toLowerCase()] = true; });
+    document.addEventListener('keyup', (e) => { this.keys[e.key.toLowerCase()] = false; });
   }
-  
+
   private onResize(): void {
-    const width = this.container.clientWidth;
-    const height = this.container.clientHeight;
-    this.camera.aspect = width / height;
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(width, height);
+    this.renderer.setSize(w, h);
   }
-  
+
   startGame(): void {
-    this.state.mode = 'playing';
-    this.state.score = 0;
-    this.state.opponentScore = 0;
-    this.state.boost = 100;
-    this.state.time = 180;
+    this.state = {
+      fps: this.state.fps, score: 0, opponentScore: 0,
+      boost: 100, speed: 0, mode: 'playing', time: 180, goalFlash: 0
+    };
     this.resetPositions();
     this.onStateChange({ ...this.state });
   }
-  
+
   private resetPositions(): void {
-    this.player.position.set(-20, 0, 0);
+    this.playerCar.position.set(-20, 0, 0);
+    this.playerCar.rotation.y = 0;
     this.playerVelocity.set(0, 0, 0);
-    this.opponent.position.set(20, 0, 0);
+    this.playerRotation = 0;
+    this.opponentCar.position.set(20, 0, 0);
+    this.opponentCar.rotation.y = Math.PI;
     this.opponentVelocity.set(0, 0, 0);
-    (this.ball as any).position.set(0, 2, 0);
+    this.ball.position.set(0, 2, 0);
     this.ballVelocity.set(0, 0, 0);
   }
-  
+
   private updatePlayer(delta: number): void {
-    const car = this.player.userData.car;
-    if (!car) return;
-    
-    const speed = 30;
-    const turnSpeed = 2.5;
-    const boostMultiplier = 1.8;
-    
-    let currentSpeed = speed;
+    const speed = 35;
+    const turnSpeed = 2.2;
     let isBoosting = false;
-    
-    // Boost
+
     if (this.keys['shift'] && this.state.boost > 0) {
-      currentSpeed *= boostMultiplier;
-      this.state.boost = Math.max(0, this.state.boost - 30 * delta);
       isBoosting = true;
+      this.state.boost = Math.max(0, this.state.boost - 30 * delta);
     } else {
       this.state.boost = Math.min(100, this.state.boost + 5 * delta);
     }
-    
-    // Show/hide boost flame
-    const flame = car.userData.flame;
-    if (flame) {
-      (flame.material as THREE.MeshBasicMaterial).opacity = isBoosting ? 0.8 : 0;
+
+    const actualSpeed = isBoosting ? speed * 1.8 : speed;
+
+    // Show boost flames
+    const body = this.playerCar.userData.body;
+    if (body) {
+      const flame = body.userData.flame;
+      const innerFlame = body.userData.innerFlame;
+      if (flame) (flame.material as THREE.MeshBasicMaterial).opacity = isBoosting && (this.keys['w'] || this.keys['arrowup']) ? 0.9 : 0;
+      if (innerFlame) (innerFlame.material as THREE.MeshBasicMaterial).opacity = isBoosting && (this.keys['w'] || this.keys['arrowup']) ? 0.8 : 0;
     }
-    
-    // Movement
+
+    // Acceleration
     if (this.keys['w'] || this.keys['arrowup']) {
-      this.playerVelocity.z -= Math.cos(this.playerRotation) * currentSpeed * delta;
-      this.playerVelocity.x -= Math.sin(this.playerRotation) * currentSpeed * delta;
+      this.playerVelocity.x += Math.cos(this.playerRotation) * actualSpeed * delta;
+      this.playerVelocity.z -= Math.sin(this.playerRotation) * actualSpeed * delta;
     }
     if (this.keys['s'] || this.keys['arrowdown']) {
-      this.playerVelocity.z += Math.cos(this.playerRotation) * currentSpeed * delta * 0.6;
-      this.playerVelocity.x += Math.sin(this.playerRotation) * currentSpeed * delta * 0.6;
+      this.playerVelocity.x -= Math.cos(this.playerRotation) * actualSpeed * 0.5 * delta;
+      this.playerVelocity.z += Math.sin(this.playerRotation) * actualSpeed * 0.5 * delta;
     }
     if (this.keys['a'] || this.keys['arrowleft']) {
-      this.playerRotation += turnSpeed * delta;
+      this.playerRotation += turnSpeed * delta * (this.playerVelocity.length() > 1 ? 1 : 0.3);
     }
     if (this.keys['d'] || this.keys['arrowright']) {
-      this.playerRotation -= turnSpeed * delta;
+      this.playerRotation -= turnSpeed * delta * (this.playerVelocity.length() > 1 ? 0.3 : 0.3);
     }
-    
+
     // Jump
-    if (this.keys[' '] && this.player.position.y <= 0.1) {
-      this.playerVelocity.y = 12;
+    if (this.keys[' '] && this.playerCar.position.y <= 0.1) {
+      this.playerVelocity.y = 14;
     }
-    
-    // Apply gravity
+
+    // Gravity
     this.playerVelocity.y += this.gravity * delta;
-    
-    // Apply friction
-    this.playerVelocity.x *= 0.95;
-    this.playerVelocity.z *= 0.95;
-    
-    // Update position
-    this.player.position.add(this.playerVelocity.clone().multiplyScalar(delta));
-    
-    // Ground collision
-    if (this.player.position.y < this.groundLevel) {
-      this.player.position.y = this.groundLevel;
+
+    // Friction
+    this.playerVelocity.x *= 0.97;
+    this.playerVelocity.z *= 0.97;
+
+    // Position
+    this.playerCar.position.add(this.playerVelocity.clone().multiplyScalar(delta));
+
+    // Ground
+    if (this.playerCar.position.y < 0) {
+      this.playerCar.position.y = 0;
       this.playerVelocity.y = 0;
     }
-    
-    // Arena bounds
-    const bound = this.arenaSize - 2;
-    this.player.position.x = Math.max(-bound, Math.min(bound, this.player.position.x));
-    this.player.position.z = Math.max(-bound * 0.6, Math.min(bound * 0.6, this.player.position.z));
-    
-    // Rotate car to face direction
-    car.rotation.y = this.playerRotation;
-    
-    // Update speed display
+
+    // Bounds
+    const bx = this.arenaLength - 3;
+    const bz = this.arenaWidth - 2;
+    this.playerCar.position.x = Math.max(-bx, Math.min(bx, this.playerCar.position.x));
+    this.playerCar.position.z = Math.max(-bz, Math.min(bz, this.playerCar.position.z));
+
+    // Rotate car
+    this.playerCar.rotation.y = this.playerRotation + Math.PI / 2;
+
+    // Speed
     this.state.speed = Math.round(this.playerVelocity.length() * 3.6);
-    
-    // Camera follow
-    const cameraOffset = new THREE.Vector3(
-      Math.sin(this.playerRotation) * 12,
-      8,
-      Math.cos(this.playerRotation) * 12
+
+    // Camera
+    const camDist = 14;
+    const camHeight = 7;
+    const camOffset = new THREE.Vector3(
+      -Math.cos(this.playerRotation) * camDist,
+      camHeight,
+      Math.sin(this.playerRotation) * camDist
     );
-    const targetCamPos = this.player.position.clone().add(cameraOffset);
-    this.camera.position.lerp(targetCamPos, 0.05);
-    this.camera.lookAt(this.player.position.clone().add(new THREE.Vector3(0, 2, 0)));
+    const targetPos = this.playerCar.position.clone().add(camOffset);
+    this.camera.position.lerp(targetPos, 0.06);
+    this.camera.lookAt(this.playerCar.position.clone().add(new THREE.Vector3(0, 2, 0)));
   }
-  
+
   private updateOpponent(delta: number): void {
-    // AI opponent
-    const ballPos = (this.ball as any).position as THREE.Vector3;
-    const oppPos = this.opponent.position;
-    
-    // Move towards ball
+    const ballPos = this.ball.position;
+    const oppPos = this.opponentCar.position;
+
     const toBall = new THREE.Vector3().subVectors(ballPos, oppPos);
     toBall.y = 0;
     const dist = toBall.length();
-    
-    if (dist > 3) {
-      toBall.normalize();
-      this.opponentVelocity.x += toBall.x * 15 * delta;
-      this.opponentVelocity.z += toBall.z * 15 * delta;
+
+    let targetAngle = Math.atan2(-toBall.z, toBall.x) - Math.PI / 2;
+
+    // Smooth rotation
+    let angleDiff = targetAngle - this.opponentCar.rotation.y;
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+    this.opponentCar.rotation.y += angleDiff * 3 * delta;
+
+    // Move forward
+    const moveSpeed = 25;
+    if (dist > 4) {
+      const dir = this.opponentCar.rotation.y - Math.PI / 2;
+      this.opponentVelocity.x += Math.cos(dir) * moveSpeed * delta;
+      this.opponentVelocity.z -= Math.sin(dir) * moveSpeed * delta;
     }
-    
-    // Apply friction
-    this.opponentVelocity.x *= 0.93;
-    this.opponentVelocity.z *= 0.93;
-    
-    // Update position
-    this.opponent.position.add(this.opponentVelocity.clone().multiplyScalar(delta));
-    
+
+    // Friction
+    this.opponentVelocity.x *= 0.95;
+    this.opponentVelocity.z *= 0.95;
+
+    // Position
+    this.opponentCar.position.add(this.opponentVelocity.clone().multiplyScalar(delta));
+
     // Ground
-    if (this.opponent.position.y < this.groundLevel) {
-      this.opponent.position.y = this.groundLevel;
+    if (this.opponentCar.position.y < 0) {
+      this.opponentCar.position.y = 0;
+      this.opponentVelocity.y = 0;
     }
-    
+
     // Bounds
-    const bound = this.arenaSize - 2;
-    this.opponent.position.x = Math.max(-bound, Math.min(bound, this.opponent.position.x));
-    this.opponent.position.z = Math.max(-bound * 0.6, Math.min(bound * 0.6, this.opponent.position.z));
-    
-    // Face ball
-    const car = this.opponent.userData.car;
-    if (car) {
-      car.rotation.y = Math.atan2(toBall.x, toBall.z);
-    }
+    const bx = this.arenaLength - 3;
+    const bz = this.arenaWidth - 2;
+    this.opponentCar.position.x = Math.max(-bx, Math.min(bx, this.opponentCar.position.x));
+    this.opponentCar.position.z = Math.max(-bz, Math.min(bz, this.opponentCar.position.z));
   }
-  
+
   private updateBall(delta: number): void {
-    const ball = this.ball as any;
-    
-    // Apply gravity
+    // Gravity
     this.ballVelocity.y += this.gravity * delta;
-    
-    // Update position
-    ball.position.add(this.ballVelocity.clone().multiplyScalar(delta));
-    
+
+    // Position
+    this.ball.position.add(this.ballVelocity.clone().multiplyScalar(delta));
+
     // Ground bounce
-    if (ball.position.y < 2) {
-      ball.position.y = 2;
-      this.ballVelocity.y = Math.abs(this.ballVelocity.y) * 0.7;
-      this.ballVelocity.x *= 0.95;
-      this.ballVelocity.z *= 0.95;
+    if (this.ball.position.y < 2) {
+      this.ball.position.y = 2;
+      this.ballVelocity.y = Math.abs(this.ballVelocity.y) * 0.65;
+      this.ballVelocity.x *= 0.97;
+      this.ballVelocity.z *= 0.97;
     }
-    
+
     // Wall bounces
-    const bound = this.arenaSize - 3;
-    if (Math.abs(ball.position.x) > bound) {
-      ball.position.x = Math.sign(ball.position.x) * bound;
-      this.ballVelocity.x *= -0.8;
-    }
-    
-    const zBound = bound * 0.6;
-    if (ball.position.z < -zBound) {
-      // Check if in goal
-      if (Math.abs(ball.position.x) < 10 && ball.position.y < 6) {
-        // GOAL for player!
-        this.state.score++;
+    const bx = this.arenaLength - 3;
+    if (Math.abs(this.ball.position.x) > bx) {
+      // Check goals
+      if (Math.abs(this.ball.position.z) < 10 && this.ball.position.y < 8) {
+        if (this.ball.position.x < 0) {
+          this.state.opponentScore++;
+          this.state.goalFlash = 2;
+        } else {
+          this.state.score++;
+          this.state.goalFlash = 2;
+        }
         this.onStateChange({ ...this.state });
         this.resetPositions();
         return;
       }
-      ball.position.z = -zBound;
-      this.ballVelocity.z *= -0.8;
+      this.ball.position.x = Math.sign(this.ball.position.x) * bx;
+      this.ballVelocity.x *= -0.7;
     }
-    if (ball.position.z > zBound) {
-      // Check if in goal
-      if (Math.abs(ball.position.x) < 10 && ball.position.y < 6) {
-        // GOAL for opponent!
-        this.state.opponentScore++;
-        this.onStateChange({ ...this.state });
-        this.resetPositions();
-        return;
-      }
-      ball.position.z = zBound;
-      this.ballVelocity.z *= -0.8;
+
+    const bz = this.arenaWidth - 3;
+    if (Math.abs(this.ball.position.z) > bz) {
+      this.ball.position.z = Math.sign(this.ball.position.z) * bz;
+      this.ballVelocity.z *= -0.7;
     }
-    
+
     // Ceiling
-    if (ball.position.y > 20) {
-      ball.position.y = 20;
+    if (this.ball.position.y > 25) {
+      this.ball.position.y = 25;
       this.ballVelocity.y *= -0.5;
     }
-    
-    // Rotate ball
-    ball.rotation.x += this.ballVelocity.z * delta * 0.5;
-    ball.rotation.z -= this.ballVelocity.x * delta * 0.5;
-    
-    // Collision with player
-    const playerDist = ball.position.distanceTo(this.player.position);
-    if (playerDist < 3.5) {
-      const pushDir = new THREE.Vector3().subVectors(ball.position, this.player.position).normalize();
-      const force = 25 + (this.keys['shift'] ? 20 : 0);
+
+    // Rotation
+    this.ball.rotation.x += this.ballVelocity.z * delta * 0.3;
+    this.ball.rotation.z -= this.ballVelocity.x * delta * 0.3;
+
+    // Collision with player car
+    const pDist = this.ball.position.distanceTo(this.playerCar.position);
+    if (pDist < 4) {
+      const pushDir = new THREE.Vector3().subVectors(this.ball.position, this.playerCar.position).normalize();
+      const force = 30 + (this.keys['shift'] ? 25 : 0);
       this.ballVelocity.add(pushDir.multiplyScalar(force));
-      this.ballVelocity.y = Math.max(this.ballVelocity.y, 5);
+      this.ballVelocity.y = Math.max(this.ballVelocity.y, 6);
     }
-    
+
     // Collision with opponent
-    const oppDist = ball.position.distanceTo(this.opponent.position);
-    if (oppDist < 3.5) {
-      const pushDir = new THREE.Vector3().subVectors(ball.position, this.opponent.position).normalize();
-      this.ballVelocity.add(pushDir.multiplyScalar(20));
-      this.ballVelocity.y = Math.max(this.ballVelocity.y, 3);
+    const oDist = this.ball.position.distanceTo(this.opponentCar.position);
+    if (oDist < 4) {
+      const pushDir = new THREE.Vector3().subVectors(this.ball.position, this.opponentCar.position).normalize();
+      this.ballVelocity.add(pushDir.multiplyScalar(25));
+      this.ballVelocity.y = Math.max(this.ballVelocity.y, 4);
     }
-    
+
     // Speed limit
-    const maxSpeed = 60;
-    if (this.ballVelocity.length() > maxSpeed) {
-      this.ballVelocity.normalize().multiplyScalar(maxSpeed);
+    if (this.ballVelocity.length() > 70) {
+      this.ballVelocity.normalize().multiplyScalar(70);
     }
   }
-  
+
   private updateTimer(delta: number): void {
     if (this.state.mode === 'playing') {
       this.state.time -= delta;
+      if (this.state.goalFlash > 0) this.state.goalFlash -= delta;
       if (this.state.time <= 0) {
         this.state.time = 0;
-        this.state.mode = 'menu';
+        this.state.mode = 'gameover';
       }
     }
   }
-  
+
   update(): void {
     const delta = Math.min(this.clock.getDelta(), 0.05);
-    
-    // FPS counter
+
+    // FPS
     this.frameCount++;
     const now = performance.now();
     if (now - this.lastFpsUpdate > 500) {
@@ -932,23 +1050,30 @@ export class GameEngine {
       this.frameCount = 0;
       this.lastFpsUpdate = now;
     }
-    
+
     if (this.state.mode === 'playing') {
       this.updatePlayer(delta);
       this.updateOpponent(delta);
       this.updateBall(delta);
       this.updateTimer(delta);
     }
-    
-    // Animate environment
-    this.trees.forEach((tree, i) => {
-      tree.rotation.z = Math.sin(now * 0.001 + i) * 0.02;
+
+    // Animate clouds
+    this.clouds.forEach((cloud, i) => {
+      cloud.position.x += 0.02 * (i % 2 === 0 ? 1 : -1);
+      if (cloud.position.x > 250) cloud.position.x = -250;
+      if (cloud.position.x < -250) cloud.position.x = 250;
     });
-    
+
+    // Animate water
+    if (this.waterMesh) {
+      this.waterMesh.position.y = -1 + Math.sin(now * 0.001) * 0.2;
+    }
+
     this.onStateChange({ ...this.state });
     this.renderer.render(this.scene, this.camera);
   }
-  
+
   startLoop(): void {
     const loop = () => {
       this.animationId = requestAnimationFrame(loop);
@@ -956,11 +1081,11 @@ export class GameEngine {
     };
     loop();
   }
-  
+
   stopLoop(): void {
     cancelAnimationFrame(this.animationId);
   }
-  
+
   dispose(): void {
     this.stopLoop();
     this.renderer.dispose();
